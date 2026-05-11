@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 """
 drumkit.py — Low-latency MIDI drum sampler for DrumGizmo kits on Linux/ALSA
-
-Usage:
-    python drumkit.py kit.xml           # Run with kit (auto-select MIDI)
-    python drumkit.py kit.xml --remap   # Force MIDI remapping
-    python drumkit.py                   # List MIDI controllers only
-
-Controls while playing:
-    +/-     Volume up/down (no upper limit)
-    q       Quit
 """
 
 import sys
@@ -322,16 +313,19 @@ def save_calibration(kit_xml: Path, calibration: dict[int, dict]):
 
 def calibrated_vel_norm(velocity: int, note: int, calibration: dict[int, dict]) -> float:
     """
-    Normalise a raw MIDI velocity (0-127) to 0.0-1.0.
+    Normalise a raw MIDI velocity (0-127) to 0.05-1.0.
     If calibration data exists for this note, stretch the observed
     min-max range to fill the full 0-1 window.
     Falls back to velocity/127 when no data is available yet.
     """
+
+    floor = 0.05  
     cal = calibration.get(note)
     if cal and cal["max"] > cal["min"]:
+        # Mapea el rango [min, max] al rango [floor, 1.0]
         norm = (velocity - cal["min"]) / (cal["max"] - cal["min"])
-        return max(0.0, min(1.0, norm))
-    return velocity / 127.0
+        return max(floor, min(1.0, norm))
+    return max(floor, velocity / 127.0)
 
 
 def update_calibration(velocity: int, note: int, calibration: dict[int, dict]):
