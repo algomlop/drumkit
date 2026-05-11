@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Auto-generated launcher — activates the venv and runs drumkit.py
+source "/home/administrador/Descargas/.venv/bin/activate"
+exec python3 "/home/administrador/Descargas/drumkit.py" "$@"
