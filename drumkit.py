@@ -55,10 +55,10 @@ def parse_kit(xml_path: Path) -> list[dict]:
 
 def parse_instrument_samples(
     inst_xml: Path, main_channels: list[str]
-) -> list[tuple[float, np.ndarray]]:
+) -> list[tuple[float, np.ndarray, str]]:
     """
     Parse a DrumGizmo instrument XML.
-    Returns a list of (power, stereo_float32_array) sorted by power ascending.
+    Returns a list of (power, stereo_float32_array, sample_name) sorted by power ascending.
     Only loads WAV channels needed for stereo output (main channels).
     """
     if not inst_xml.exists():
@@ -110,6 +110,7 @@ def parse_instrument_samples(
 
     for sample in samples_elem.findall("sample"):
         power = float(sample.get("power", 0.5))
+        sample_name = sample.get("name", "unknown")
 
         # Map channel name → (wav_path, 0-indexed file channel)
         ch_map: dict[str, tuple[Path, int]] = {}
@@ -148,7 +149,7 @@ def parse_instrument_samples(
         stereo = np.ascontiguousarray(
             np.column_stack([left_data, right_data]), dtype=np.float32
         )
-        layers.append((power, stereo))
+        layers.append((power, stereo, sample_name))
 
     layers.sort(key=lambda x: x[0])
     return layers
@@ -318,8 +319,7 @@ def calibrated_vel_norm(velocity: int, note: int, calibration: dict[int, dict]) 
     min-max range to fill the full 0-1 window.
     Falls back to velocity/127 when no data is available yet.
     """
-
-    floor = 0.05  
+    floor = 0.05
     cal = calibration.get(note)
     if cal and cal["max"] > cal["min"]:
         # Mapea el rango [min, max] al rango [floor, 1.0]
@@ -412,28 +412,27 @@ def do_mapping(
 
 # ─── Sample selection ─────────────────────────────────────────────────────────
 
-# Round-robin counters: {instrument_name: {power_key: next_index}}
-_rr_counters: dict[str, dict[float, int]] = {}
-
 def pick_velocity_layer(
     inst_name: str,
-    layers: list[tuple[float, np.ndarray]],
+    layers: list[tuple[float, np.ndarray, str]],
     vel_norm: float,                        # 0.0–1.0, already calibrated
-) -> np.ndarray:
+) -> tuple[np.ndarray, str]:
     """
-    Select the best velocity layer using a normalised velocity (0.0–1.0).
-    Round-robin within layers that share the same power value to avoid
-    the machine-gun effect on repeated hits.
+    Select a velocity layer based on normalised velocity.
+    Layers are sorted by power. The index is chosen proportionally to vel_norm.
+    Returns (stereo_array, sample_name).
     """
-    best_power = min(layers, key=lambda x: abs(x[0] - vel_norm))[0]
-    power_key  = round(best_power, 4)
-    candidates = [arr for p, arr in layers if round(p, 4) == power_key]
-
-    rr  = _rr_counters.setdefault(inst_name, {})
-    idx = rr.get(power_key, 0) % len(candidates)
-    rr[power_key] = idx + 1
-
-    return candidates[idx]
+    if not layers:
+        raise ValueError("No layers available")
+    # Sort by power (should already be sorted, but ensure)
+    sorted_layers = sorted(layers, key=lambda x: x[0])
+    n = len(sorted_layers)
+    # Map vel_norm (0..1) to index 0..n-1 using a linear proportion.
+    # For the example: n=10, vel_norm=0.5 → int(0.5*9)=4 → sample #5 (if counting from 1).
+    idx = int(vel_norm * (n - 1))
+    idx = max(0, min(n - 1, idx))
+    power, stereo, name = sorted_layers[idx]
+    return stereo, name
 
 
 # ─── Main play loop ───────────────────────────────────────────────────────────
@@ -519,14 +518,13 @@ def run_player(
                         else:
                             vel_norm = velocity / 127.0
 
-                        if debug:
-                            print(f"     vel_raw:{velocity:3d}  vel_norm:{vel_norm:.3f}")
-
                         # ── Pick sample + gain ───────────────────────────
                         inst_name = mapping[note]
                         layers    = samples.get(inst_name)
                         if layers:
-                            arr  = pick_velocity_layer(inst_name, layers, vel_norm)
+                            arr, sample_name = pick_velocity_layer(inst_name, layers, vel_norm)
+                            if debug:
+                                print(f"     sample: {sample_name}  vel_raw:{velocity:3d}  vel_norm:{vel_norm:.3f}")
                             gain = vel_norm if velocity_volume else 1.0
                             engine.play(arr, gain)
 
@@ -612,6 +610,8 @@ def main():
     )
     args = parser.parse_args()
 
+    velocity_calibrate_enabled = args.velocity_calibrate == "on"
+
     # ── No XML: just list MIDI ports ──────────────────────────────────────────
     if not args.kit_xml:
         ports = list_midi_ports()
@@ -651,6 +651,11 @@ def main():
 
     if mapping is None:
         mapping = do_mapping(inst_names, midi_port_idx, kit_xml)
+        # After mapping, create/overwrite calibration file with initial values
+        if velocity_calibrate_enabled and mapping:
+            init_cal = {note: {"min": 127, "max": 0} for note in mapping}
+            save_calibration(kit_xml, init_cal)
+            print("Calibration file initialised with min=127, max=0 for all mapped notes.")
 
     if not mapping:
         print("No notes mapped. Exiting.")
@@ -671,9 +676,9 @@ def main():
         layers = parse_instrument_samples(inst_xml, inst["main_channels"])
         if layers:
             # Pre-warm: touch memory so first hit doesn't cause page faults
-            _ = layers[0][1].sum()
+            _ = layers[0][1].sum()  # stereo array is the second element
             samples[name] = layers
-            total_s = sum(len(a) for _, a in layers) / SAMPLERATE
+            total_s = sum(len(arr) for _, arr, _ in layers) / SAMPLERATE
             print(f"{len(layers):2d} layers  {total_s:.1f}s")
         else:
             print("no samples found")
@@ -697,7 +702,7 @@ def main():
             samples, mapping, midi_port_idx, engine,
             midi_channel=args.channel,
             velocity_volume=(args.velocity_volume == "on"),
-            velocity_calibrate=(args.velocity_calibrate == "on"),
+            velocity_calibrate=velocity_calibrate_enabled,
             kit_xml=kit_xml,
         )
     finally:
