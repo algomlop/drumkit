@@ -678,7 +678,7 @@ def main():
             print(f"Loaded mapping from disk ({len(mapping)} notes mapped)")
 
     if mapping is None:
-        mapping = do_mapping(inst_names, midi_port_idx, kit_xml)
+        mapping = do_mapping(instruments, midi_port_idx, kit_xml)
         if velocity_calibrate_enabled and mapping:
             init_cal = {note: {"min": 127, "max": 0} for note in mapping}
             save_calibration(kit_xml, init_cal)
