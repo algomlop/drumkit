@@ -16,7 +16,11 @@ This program was born out of frustration with existing Linux alternatives like t
 The installer handles system dependencies (`libasound2-dev`, `libportaudio2`, `pkg-config`, etc.), creates a Python virtual environment, and generates a launcher.
 
 ```bash
+Linux:
 bash install.sh
+
+Windows (powershell):
+install_windows.ps1
 ```
 
 ## Quick Start
@@ -25,7 +29,11 @@ bash install.sh
 * List MIDI controllers: Run without arguments to see available devices.
 
 ```bash
+Linux:
 ./drumkit
+
+Windows:
+drumkit.bat
 ```
 
 
