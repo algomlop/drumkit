@@ -7,7 +7,7 @@ This program was born out of frustration with existing Linux alternatives like t
 
 ### Tested Environment
 * **OS:** Lubuntu (Linux) and Windows 10 with Python 3.
-* **Kit:** Specifically tested with the **CrocellKit** (DrumGizmo format). In releases you have a 5 lane working drumkit example.
+* **Kit:** CrocellKit (DrumGizmo format). **In releases you have a 5 lane working drumkit.**
 
 ---
 
