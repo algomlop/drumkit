@@ -44,13 +44,22 @@ echo
 echo "[3/3] Creating launcher…"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-cat > "$SCRIPT_DIR/drumkit" << EOF
+cat > "$SCRIPT_DIR/drumkit" << 'LAUNCHER'
 #!/usr/bin/env bash
-# Auto-generated launcher — activates the venv and runs drumkit.py
-source "$VENV_DIR/bin/activate"
-exec python3 "$SCRIPT_DIR/drumkit.py" "\$@"
-EOF
+# Launcher: activates the local venv and runs drumkit.py
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/.venv/bin/activate"
+exec python3 "$SCRIPT_DIR/drumkit.py" "$@"
+LAUNCHER
 chmod +x "$SCRIPT_DIR/drumkit"
+
+# Windows batch launcher (useful when copying the folder to a Windows machine)
+cat > "$SCRIPT_DIR/drumkit.bat" << 'WLAUNCHER'
+@echo off
+:: Launcher for Windows: activates the local venv and runs drumkit.py
+set SCRIPT_DIR=%~dp0
+"%SCRIPT_DIR%.venv\Scripts\python.exe" "%SCRIPT_DIR%drumkit.py" %*
+WLAUNCHER
 
 echo
 echo "✓ Done!  Run the kit with:"
@@ -58,5 +67,7 @@ echo
 echo "  ./drumkit                               # list MIDI controllers"
 echo "  ./drumkit path/to/kit.xml              # run the kit"
 echo "  ./drumkit path/to/kit.xml --remap      # re-do MIDI mapping"
+echo
+echo "  On Windows: use drumkit.bat and install_windows.ps1 instead."
 echo
 echo "Controls while playing:  [+] vol up   [-] vol down   [q] quit"
