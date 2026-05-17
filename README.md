@@ -1,4 +1,4 @@
-# drumkit
+# Easy drumkit
 
 Low-latency MIDI drum sampler for **DrumGizmo** kits.
 
@@ -6,8 +6,8 @@ Low-latency MIDI drum sampler for **DrumGizmo** kits.
 This program was born out of frustration with existing Linux alternatives like the official **DrumGizmo** plugin or **Hydrogen**, which were found to be overly complex for a simple "plug and play" setup. This script provides a lightweight, high-performance bridge between your MIDI controller and DrumGizmo XML kits without needing a DAW.
 
 ### Tested Environment
-* **OS:** Lubuntu (Linux).
-* **Kit:** Specifically tested with the **CrocellKit** (DrumGizmo format). In releases you have a 5 lane drumkit example.
+* **OS:** Lubuntu (Linux) and Windows 10.
+* **Kit:** Specifically tested with the **CrocellKit** (DrumGizmo format). In releases you have a 5 lane working drumkit example.
 
 ---
 
