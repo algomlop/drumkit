@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-drumkit.py — Low-latency MIDI drum sampler for DrumGizmo kits on Linux/ALSA
+drumkit.py — Low-latency MIDI drum sampler for DrumGizmo kits
+Supports Linux/ALSA and Windows (WinMM via python-rtmidi).
 """
 
 import sys
@@ -9,9 +10,6 @@ import json
 import time
 import threading
 import argparse
-import select
-import tty
-import termios
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from collections import deque
@@ -21,6 +19,17 @@ import sounddevice as sd
 import soundfile as sf
 import rtmidi
 
+# ─── Platform detection ────────────────────────────────────────────────────────
+
+IS_WINDOWS = sys.platform == "win32"
+
+if IS_WINDOWS:
+    import msvcrt
+else:
+    import tty
+    import termios
+    import select
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 CONFIG_DIR   = Path.home() / ".config" / "drumkit"
@@ -29,6 +38,48 @@ BLOCKSIZE    = 128          # ~2.7 ms per block at 48 kHz
 CHANNELS     = 2
 MAX_VOICES   = 64           # maximum simultaneous sounds
 VOLUME_STEP  = 0.1
+
+
+# ─── Cross-platform terminal helpers ─────────────────────────────────────────
+
+def _save_term():
+    """Save terminal state (Unix only). Returns opaque state or None."""
+    if IS_WINDOWS:
+        return None
+    return termios.tcgetattr(sys.stdin)
+
+
+def _set_cbreak():
+    """Switch stdin to cbreak/raw mode for single-keypress reads (Unix only)."""
+    if IS_WINDOWS:
+        return  # msvcrt already reads key-by-key without echo
+    tty.setcbreak(sys.stdin.fileno())
+
+
+def _restore_term(old_settings):
+    """Restore terminal state saved by _save_term()."""
+    if IS_WINDOWS or old_settings is None:
+        return
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+
+def _read_key() -> str | None:
+    """
+    Non-blocking single-character read from the keyboard.
+    Returns the character, or None if no key is currently pressed.
+    """
+    if IS_WINDOWS:
+        if msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            # getwch returns a 2-char sentinel for special/function keys
+            if ch in ("\x00", "\xe0"):
+                msvcrt.getwch()  # consume the second byte and ignore
+                return None
+            return ch
+    else:
+        if select.select([sys.stdin], [], [], 0)[0]:
+            return sys.stdin.read(1)
+    return None
 
 
 # ─── XML parsing ──────────────────────────────────────────────────────────────
@@ -244,7 +295,10 @@ def select_midi_port() -> int:
     ports = list_midi_ports()
     if not ports:
         print("No MIDI input devices found.")
-        print("Make sure your device is connected and ALSA sees it (aconnect -i).")
+        if IS_WINDOWS:
+            print("Make sure your device is connected and Windows sees it (Device Manager).")
+        else:
+            print("Make sure your device is connected and ALSA sees it (aconnect -i).")
         sys.exit(1)
     if len(ports) == 1:
         print(f"MIDI: {ports[0]}")
@@ -266,10 +320,21 @@ def select_midi_port() -> int:
 
 # ─── Mapping persistence ──────────────────────────────────────────────────────
 
+def _safe_filename(kit_xml: Path) -> str:
+    """
+    Convert an absolute path to a safe flat filename component.
+    Works on both Unix (/home/user/...) and Windows (C:/Users/...).
+    """
+    # as_posix() normalises backslashes to forward slashes on all platforms.
+    posix = kit_xml.resolve().as_posix()
+    # Strip drive-letter colons ("C:") then replace separators with "_".
+    safe = posix.replace(":", "").replace("/", "_").lstrip("_")
+    return safe
+
+
 def get_mapping_path(kit_xml: Path) -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    safe = kit_xml.resolve().as_posix().replace("/", "_").lstrip("_")
-    return CONFIG_DIR / f"{safe}.json"
+    return CONFIG_DIR / f"{_safe_filename(kit_xml)}.json"
 
 
 def load_mapping(kit_xml: Path) -> dict[int, str] | None:
@@ -292,8 +357,7 @@ def save_mapping(kit_xml: Path, mapping: dict[int, str]):
 
 def get_calibration_path(kit_xml: Path) -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    safe = kit_xml.resolve().as_posix().replace("/", "_").lstrip("_")
-    return CONFIG_DIR / f"{safe}_calibration.json"
+    return CONFIG_DIR / f"{_safe_filename(kit_xml)}_calibration.json"
 
 
 def load_calibration(kit_xml: Path) -> dict[int, dict]:
@@ -359,10 +423,10 @@ def do_mapping(
     midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
 
     mapping: dict[int, str] = {}
-    old_settings = termios.tcgetattr(sys.stdin)
+    old_settings = _save_term()
 
     try:
-        tty.setcbreak(sys.stdin.fileno())
+        _set_cbreak()
 
         for name in instrument_names:
             print(f"  {name:<22} → ", end="", flush=True)
@@ -385,9 +449,9 @@ def do_mapping(
                         note = data[1]
                         break
 
-                # Check keyboard (Enter = skip, without blocking)
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    ch = sys.stdin.read(1)
+                # Check keyboard (Enter = skip, non-blocking)
+                ch = _read_key()
+                if ch is not None:
                     if ch in ("\n", "\r"):
                         break
                     # Any other key also skips
@@ -402,7 +466,7 @@ def do_mapping(
                 print("(skipped)")
 
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        _restore_term(old_settings)
         midi_in.close_port()
         del midi_in
 
@@ -424,11 +488,8 @@ def pick_velocity_layer(
     """
     if not layers:
         raise ValueError("No layers available")
-    # Sort by power (should already be sorted, but ensure)
     sorted_layers = sorted(layers, key=lambda x: x[0])
     n = len(sorted_layers)
-    # Map vel_norm (0..1) to index 0..n-1 using a linear proportion.
-    # For the example: n=10, vel_norm=0.5 → int(0.5*9)=4 → sample #5 (if counting from 1).
     idx = int(vel_norm * (n - 1))
     idx = max(0, min(n - 1, idx))
     power, stereo, name = sorted_layers[idx]
@@ -445,18 +506,16 @@ def run_player(
     midi_channel: int | None = None,
     velocity_volume: bool = False,
     velocity_calibrate: bool = True,
-    kit_xml: Path | None = None,          # needed to persist calibration
+    kit_xml: Path | None = None,
 ):
     midi_in = rtmidi.MidiIn()
     midi_in.open_port(midi_port_idx)
     midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
 
-    # ── Load calibration ─────────────────────────────────────────────────────
     calibration: dict[int, dict] = {}
     if velocity_calibrate and kit_xml:
         calibration = load_calibration(kit_xml)
 
-    # ── Show active mapping ──────────────────────────────────────────────────
     print("\nActive mapping:")
     for note in sorted(mapping):
         inst  = mapping[note]
@@ -476,13 +535,12 @@ def run_player(
 
     debug   = False
     running = True
-    old_settings = termios.tcgetattr(sys.stdin)
+    old_settings = _save_term()
 
     try:
-        tty.setcbreak(sys.stdin.fileno())
+        _set_cbreak()
 
         while running:
-            # ── MIDI input ──────────────────────────────────────────────────
             msg = midi_in.get_message()
             if msg:
                 data, delta_t = msg
@@ -505,20 +563,17 @@ def run_player(
                     velocity = data[2]
 
                     if midi_channel is not None and ch != (midi_channel - 1):
-                        pass  # wrong channel, ignore
+                        pass
                     elif status == 0x90 and velocity > 0 and note in mapping:
 
-                        # ── Calibration update ───────────────────────────
                         if velocity_calibrate:
                             update_calibration(velocity, note, calibration)
 
-                        # ── Normalise velocity ───────────────────────────
                         if velocity_calibrate:
                             vel_norm = calibrated_vel_norm(velocity, note, calibration)
                         else:
                             vel_norm = velocity / 127.0
 
-                        # ── Pick sample + gain ───────────────────────────
                         inst_name = mapping[note]
                         layers    = samples.get(inst_name)
                         if layers:
@@ -528,9 +583,8 @@ def run_player(
                             gain = vel_norm if velocity_volume else 1.0
                             engine.play(arr, gain)
 
-            # ── Keyboard input (non-blocking) ───────────────────────────────
-            if select.select([sys.stdin], [], [], 0)[0]:
-                ch = sys.stdin.read(1)
+            ch = _read_key()
+            if ch is not None:
                 if ch == "+":
                     engine.volume = round(engine.volume + VOLUME_STEP, 3)
                     print(f"\r  Volume: {vol_pct()}    ", end="", flush=True)
@@ -549,10 +603,9 @@ def run_player(
     except KeyboardInterrupt:
         pass
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        _restore_term(old_settings)
         midi_in.close_port()
         del midi_in
-        # Persist calibration on exit
         if velocity_calibrate and kit_xml and calibration:
             save_calibration(kit_xml, calibration)
 
@@ -570,49 +623,22 @@ def main():
         nargs="?",
         help="Path to the drumkit XML file (e.g. CrocellKit_default.xml)",
     )
-    parser.add_argument(
-        "--remap",
-        action="store_true",
-        help="Discard saved mapping and re-map MIDI notes",
-    )
-    parser.add_argument(
-        "--blocksize",
-        type=int,
-        default=BLOCKSIZE,
-        metavar="N",
-        help=f"Audio block size in frames (default {BLOCKSIZE} ≈ {1000*BLOCKSIZE/SAMPLERATE:.1f} ms)",
-    )
-    parser.add_argument(
-        "--channel",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Only respond to MIDI channel N (1-16). Default: all channels",
-    )
-    parser.add_argument(
-        "--velocity-volume",
-        choices=["on", "off"],
-        default="off",
-        help="Apply velocity as volume multiplier (default: off — samples already differ in level)",
-    )
-    parser.add_argument(
-        "--velocity-calibrate",
-        choices=["on", "off"],
-        default="on",
-        help="Dynamically calibrate velocity range per note (default: on)",
-    )
-    parser.add_argument(
-        "--volume",
-        type=float,
-        default=1.0,
-        metavar="F",
-        help="Initial volume multiplier (default 1.0 = 100%%, values >1 allowed)",
-    )
+    parser.add_argument("--remap", action="store_true",
+        help="Discard saved mapping and re-map MIDI notes")
+    parser.add_argument("--blocksize", type=int, default=BLOCKSIZE, metavar="N",
+        help=f"Audio block size in frames (default {BLOCKSIZE} ≈ {1000*BLOCKSIZE/SAMPLERATE:.1f} ms)")
+    parser.add_argument("--channel", type=int, default=None, metavar="N",
+        help="Only respond to MIDI channel N (1-16). Default: all channels")
+    parser.add_argument("--velocity-volume", choices=["on", "off"], default="off",
+        help="Apply velocity as volume multiplier (default: off)")
+    parser.add_argument("--velocity-calibrate", choices=["on", "off"], default="on",
+        help="Dynamically calibrate velocity range per note (default: on)")
+    parser.add_argument("--volume", type=float, default=1.0, metavar="F",
+        help="Initial volume multiplier (default 1.0 = 100%%, values >1 allowed)")
     args = parser.parse_args()
 
     velocity_calibrate_enabled = args.velocity_calibrate == "on"
 
-    # ── No XML: just list MIDI ports ──────────────────────────────────────────
     if not args.kit_xml:
         ports = list_midi_ports()
         if not ports:
@@ -623,7 +649,6 @@ def main():
                 print(f"  [{i}] {p}")
         sys.exit(0)
 
-    # ── Load kit ──────────────────────────────────────────────────────────────
     kit_xml = Path(args.kit_xml)
     if not kit_xml.exists():
         print(f"Error: file not found: {kit_xml}", file=sys.stderr)
@@ -639,10 +664,8 @@ def main():
     inst_names = [i["name"] for i in instruments]
     print(f"Instruments ({len(inst_names)}): {', '.join(inst_names)}")
 
-    # ── Select MIDI port ──────────────────────────────────────────────────────
     midi_port_idx = select_midi_port()
 
-    # ── Load or create mapping ────────────────────────────────────────────────
     mapping: dict[int, str] | None = None
     if not args.remap:
         mapping = load_mapping(kit_xml)
@@ -651,7 +674,6 @@ def main():
 
     if mapping is None:
         mapping = do_mapping(inst_names, midi_port_idx, kit_xml)
-        # After mapping, create/overwrite calibration file with initial values
         if velocity_calibrate_enabled and mapping:
             init_cal = {note: {"min": 127, "max": 0} for note in mapping}
             save_calibration(kit_xml, init_cal)
@@ -661,9 +683,8 @@ def main():
         print("No notes mapped. Exiting.")
         sys.exit(0)
 
-    # ── Load only the samples that are actually mapped ────────────────────────
     print("\nLoading samples…")
-    kit_dir   = kit_xml.parent
+    kit_dir      = kit_xml.parent
     mapped_insts = set(mapping.values())
     samples: dict[str, list] = {}
 
@@ -675,8 +696,7 @@ def main():
         print(f"  {name:<22} ", end="", flush=True)
         layers = parse_instrument_samples(inst_xml, inst["main_channels"])
         if layers:
-            # Pre-warm: touch memory so first hit doesn't cause page faults
-            _ = layers[0][1].sum()  # stereo array is the second element
+            _ = layers[0][1].sum()
             samples[name] = layers
             total_s = sum(len(arr) for _, arr, _ in layers) / SAMPLERATE
             print(f"{len(layers):2d} layers  {total_s:.1f}s")
@@ -687,14 +707,16 @@ def main():
         print("No samples could be loaded. Check WAV paths.", file=sys.stderr)
         sys.exit(1)
 
-    # ── Start audio engine ────────────────────────────────────────────────────
     engine = AudioEngine(blocksize=args.blocksize)
     engine.volume = args.volume
     try:
         engine.start()
     except sd.PortAudioError as e:
         print(f"Audio error: {e}", file=sys.stderr)
-        print("Try: apt install libportaudio2  or install PipeWire/JACK", file=sys.stderr)
+        if IS_WINDOWS:
+            print("Try reinstalling PortAudio or check your audio device settings.", file=sys.stderr)
+        else:
+            print("Try: apt install libportaudio2  or install PipeWire/JACK", file=sys.stderr)
         sys.exit(1)
 
     try:
