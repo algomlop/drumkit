@@ -406,7 +406,7 @@ def update_calibration(velocity: int, note: int, calibration: dict[int, dict]):
 # ─── Interactive mapping ───────────────────────────────────────────────────────
 
 def do_mapping(
-    instrument_names: list[str], midi_port_idx: int, kit_xml: Path
+    instruments: list[dict], midi_port_idx: int, kit_xml: Path
 ) -> dict[int, str]:
     """
     Walk through each instrument, wait for a MIDI note-on or Enter (skip).
@@ -427,9 +427,14 @@ def do_mapping(
 
     try:
         _set_cbreak()
-
-        for name in instrument_names:
+        kit_dir = kit_xml.parent
+        for inst in instruments:
+            name = inst["name"]
+            if not (kit_dir / inst["file"]).exists():
+                continue
             print(f"  {name:<22} → ", end="", flush=True)
+
+       
 
             # Flush stale MIDI messages
             while midi_in.get_message():
@@ -461,7 +466,7 @@ def do_mapping(
 
             if note is not None:
                 mapping[note] = name
-                print(f"note {note:3d}  ✓")
+                print(f"note {note:3d}  ok")
             else:
                 print("(skipped)")
 
