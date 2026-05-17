@@ -26,7 +26,6 @@ python -m venv $VenvDir
 
 $pip = Join-Path $VenvDir "Scripts\pip.exe"
 
-& $pip install --upgrade pip -q
 & $pip install python-rtmidi sounddevice soundfile numpy
 
 $ans = Read-Host "      Install scipy (optional, for sample-rate conversion)? [y/N]"
