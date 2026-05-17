@@ -31,7 +31,7 @@ $py   = Join-Path $VenvDir "Scripts\python.exe"
 & $pip install python-rtmidi sounddevice soundfile numpy
 
 $ans = Read-Host "      Install scipy (optional, for sample-rate conversion)? [y/N]"
-if ($ans -match "^[Yy]$") {
+if ($ans -match '^[Yy]$') {
     & $pip install scipy
 }
 
